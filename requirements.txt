@@ -1,1 +1,5 @@
-streamlityfinancepandaslxml
+streamlit
+yfinance
+pandas
+lxml
+plotly
