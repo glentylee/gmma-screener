@@ -33,7 +33,6 @@ def get_market_tickers():
     headers = {'User-Agent': 'Mozilla/5.0'}
     tickers = []
     
-    # Get S&P 500
     try:
         sp_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         sp_html = requests.get(sp_url, headers=headers).text
@@ -42,7 +41,6 @@ def get_market_tickers():
     except:
         pass
         
-    # Get NASDAQ 100
     try:
         ndx_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
         ndx_html = requests.get(ndx_url, headers=headers).text
@@ -54,7 +52,6 @@ def get_market_tickers():
     except:
         pass
         
-    # Clean up tickers (Wikipedia uses dots, yfinance needs hyphens)
     clean_tickers = [t.replace('.', '-') for t in set(tickers) if type(t) == str]
     return clean_tickers if clean_tickers else ["AAPL", "MSFT", "NVDA", "SPY"]
 
@@ -103,6 +100,7 @@ def evaluate_gmma(close_prices):
     long_spread = max_l - min_l
     daily_compression = short_spread < (long_spread * 0.5)
     
+    # Calculate consecutive days of compression looking backward from the most recent day
     compression_count = 0
     for is_compressed in reversed(daily_compression.tolist()):
         if is_compressed:
@@ -113,12 +111,14 @@ def evaluate_gmma(close_prices):
     all_short_above_long = min_s.iloc[-1] > max_l.iloc[-1]
     mixed_short_long = (min_s.iloc[-1] <= max_l.iloc[-1]) and (max_s.iloc[-1] >= min_l.iloc[-1])
     
+    # Define the state purely by line position so you can see compression counts even if they are 0
     chart_state = "None"
     if all_short_above_long:
-        chart_state = "Standard Bullish (All short > All long)"
-        if compression_count > 0:
+        if "Above" in scan_type:
             chart_state = "Condition 1: Compression Above (Pullback)"
-    elif mixed_short_long and compression_count > 0:
+        else:
+            chart_state = "Standard Bullish (All short > All long)"
+    elif mixed_short_long and "Mixed" in scan_type:
         chart_state = "Condition 2: Compression Mixed (Deep Pullback)"
         
     return chart_state, compression_count, emas
@@ -134,7 +134,6 @@ if st.sidebar.button("Run Screener"):
     broad_market = get_market_tickers()
     all_tickers = list(set(broad_market + custom_tickers))
     
-    # Ensure at least 2 tickers to force yfinance to always return a MultiIndex DataFrame
     if len(all_tickers) < 2:
         all_tickers.append("SPY")
         
@@ -149,7 +148,6 @@ if st.sidebar.button("Run Screener"):
     
     for ticker in all_tickers:
         try:
-            # Safely extract close prices whether it is a MultiIndex or not
             if isinstance(data.columns, pd.MultiIndex):
                 if ticker in data['Close'].columns:
                     close_prices = data['Close'][ticker].dropna()
@@ -160,15 +158,15 @@ if st.sidebar.button("Run Screener"):
                 
             chart_state, comp_days, emas = evaluate_gmma(close_prices)
             
-            if chart_state == scan_type or (scan_type == "Standard Bullish (All short > All long)" and "Standard" in chart_state):
+            if chart_state == scan_type:
                 passed_gmma.append({
                     "Ticker": ticker,
-                    "Compression Periods": comp_days
+                    "Periods Compressed": comp_days
                 })
         except Exception:
             pass 
             
-    st.write(f"✅ {len(passed_gmma)} stocks matched the chart pattern. Now checking Market Cap (>{min_market_cap}B)...")
+    st.write(f"✅ {len(passed_gmma)} stocks matched the chart pattern. Now getting Company Info & Market Cap (>{min_market_cap}B)...")
     
     final_results = []
     if passed_gmma:
@@ -184,7 +182,10 @@ if st.sidebar.button("Run Screener"):
                 if market_cap_b >= min_market_cap:
                     final_results.append({
                         "Ticker": ticker,
-                        "Periods Compressed": item["Compression Periods"],
+                        "Company Name": info.get("longName", "N/A"),
+                        "Sector": info.get("sector", "N/A"),
+                        "Industry": info.get("industry", "N/A"),
+                        "Periods Compressed": item["Periods Compressed"],
                         "Market Cap ($B)": round(market_cap_b, 2),
                         "Price": round(info.get("currentPrice", info.get("regularMarketPrice", 0)), 2)
                     })
@@ -198,14 +199,28 @@ if st.sidebar.button("Run Screener"):
 if st.session_state.scan_results:
     st.success(f"Found {len(st.session_state.scan_results)} stocks matching your criteria!")
     
-    df_results = pd.DataFrame(st.session_state.scan_results)
-    st.dataframe(df_results.sort_values(by="Periods Compressed", ascending=False), use_container_width=True)
+    # Sort the dataframe and reset the index so Streamlit's row selection maps perfectly
+    df_results = pd.DataFrame(st.session_state.scan_results).sort_values(by="Periods Compressed", ascending=False).reset_index(drop=True)
+    
+    st.write("👉 **Click anywhere on a row below to instantly view its chart.**")
+    
+    # Renders the interactive table and captures your click
+    selection_event = st.dataframe(
+        df_results, 
+        use_container_width=True, 
+        on_select="rerun", 
+        selection_mode="single-row"
+    )
     
     st.markdown("---")
     st.subheader("📊 Visual Charting")
     
-    passed_tickers = df_results["Ticker"].tolist()
-    selected_ticker = st.selectbox("Select a stock to view its GMMA chart:", passed_tickers)
+    selected_ticker = None
+    
+    # Check if a row was clicked
+    if selection_event and "selection" in selection_event and selection_event["selection"].get("rows"):
+        selected_row_index = selection_event["selection"]["rows"][0]
+        selected_ticker = df_results.iloc[selected_row_index]["Ticker"]
     
     if selected_ticker and st.session_state.full_data is not None:
         try:
@@ -221,7 +236,7 @@ if st.session_state.scan_results:
                 
             _, _, emas = evaluate_gmma(ticker_data['Close'])
             
-            lookback = 30 
+            lookback = 40 # Increased slightly to give a better view of the trend
             plot_data = ticker_data.iloc[-lookback:]
             
             fig = go.Figure()
@@ -239,8 +254,10 @@ if st.session_state.scan_results:
             for p in [30, 35, 40, 45, 50, 60]:
                 fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='red', width=1), name=f"EMA {p}", hoverinfo='none'))
 
+            company_name = df_results.loc[df_results['Ticker'] == selected_ticker, 'Company Name'].values[0]
+            
             fig.update_layout(
-                title=f"{selected_ticker} - Last {lookback} Periods GMMA",
+                title=f"{selected_ticker} - {company_name}",
                 yaxis_title="Price",
                 xaxis_rangeslider_visible=False,
                 height=600,
@@ -248,7 +265,9 @@ if st.session_state.scan_results:
             )
             
             st.plotly_chart(fig, use_container_width=True)
-        except Exception:
+        except Exception as e:
             st.error("Could not generate chart for this ticker.")
+    else:
+        st.info("👆 Click a row in the table above to load its chart.")
 elif st.session_state.full_data is not None:
     st.warning("No stocks met all the criteria right now. Try a different setup, or lower the Market Cap.")
