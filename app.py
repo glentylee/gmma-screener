@@ -51,7 +51,7 @@ scan_type = st.sidebar.selectbox(
 custom_input = st.sidebar.text_area("Custom Watchlist (comma-separated)", "NVDA, PLTR, TSLA")
 timeframe = st.sidebar.radio("Chart Timeframe", ["1d", "1wk"], format_func=lambda x: "Daily" if x == "1d" else "Weekly")
 
-# 4. The Advanced Math for Compression and Intersection
+# 4. The Advanced Math for 5-Candle Compression
 def evaluate_gmma(close_prices):
     if len(close_prices) < 65: 
         return "None"
@@ -63,38 +63,42 @@ def evaluate_gmma(close_prices):
     for period in short_emas + long_emas:
         emas[period] = close_prices.ewm(span=period, adjust=False).mean()
         
-    # Get the current values of the EMAs on the very last day
-    current_shorts = [emas[p].iloc[-1] for p in short_emas]
-    current_longs = [emas[p].iloc[-1] for p in long_emas]
+    # Group the short and long EMAs into dataframes to analyze history easily
+    short_df = pd.DataFrame({p: emas[p] for p in short_emas})
+    long_df = pd.DataFrame({p: emas[p] for p in long_emas})
     
-    max_s = max(current_shorts)
-    min_s = min(current_shorts)
-    max_l = max(current_longs)
-    min_l = min(current_longs)
+    # Calculate the max and min lines for every single day in the chart
+    max_s = short_df.max(axis=1)
+    min_s = short_df.min(axis=1)
+    max_l = long_df.max(axis=1)
+    min_l = long_df.min(axis=1)
     
-    # Check Long Term Uptrend (Red lines are moving up and stacked)
-    # 30-day EMA is higher than 60-day EMA
+    # Check Long Term Uptrend on the most recent day
     is_long_uptrend = emas[30].iloc[-1] > emas[60].iloc[-1]
     
     if not is_long_uptrend:
         return "None"
         
-    # Check for Compression
-    # Compression is true if the short-term spread is less than half the size of the long-term spread
+    # --- NEW 5-CANDLE COMPRESSION LOGIC ---
+    # Create a true/false list for every day showing if it was compressed
     short_spread = max_s - min_s
     long_spread = max_l - min_l
-    is_compressed = short_spread < (long_spread * 0.5)
+    daily_compression = short_spread < (long_spread * 0.5)
     
-    # State flags
-    all_short_above_long = min_s > max_l
-    mixed_short_long = (min_s <= max_l) and (max_s >= min_l)
+    # Check if the last 5 candles were ALL True (compressed)
+    is_compressed_5_candles = daily_compression.iloc[-5:].all()
+    
+    # Check the current day's position (Above vs Mixed)
+    all_short_above_long = min_s.iloc[-1] > max_l.iloc[-1]
+    mixed_short_long = (min_s.iloc[-1] <= max_l.iloc[-1]) and (max_s.iloc[-1] >= min_l.iloc[-1])
     
     # Categorize the current chart setup
-    if is_compressed and all_short_above_long:
+    if is_compressed_5_candles and all_short_above_long:
         return "Condition 1: Compression Above (Pullback)"
-    elif is_compressed and mixed_short_long:
+    elif is_compressed_5_candles and mixed_short_long:
         return "Condition 2: Compression Mixed (Deep Pullback)"
     elif all_short_above_long:
+        # Standard bullish doesn't care about compression
         return "Standard Bullish (All short > All long)"
         
     return "None"
@@ -105,16 +109,12 @@ if st.sidebar.button("Run Screener"):
     sp500 = get_sp500_tickers()
     all_tickers = list(set(sp500 + custom_tickers))
     
-    # --- THE FIX ---
-    # 1 year only has 52 weeks. GMMA needs 60 periods to calculate the longest line.
-    # We dynamically request 5 years of data if 'Weekly' is selected.
+    # Request 5 years for Weekly to ensure we have enough data
     data_period = "5y" if timeframe == "1wk" else "1y"
     
     st.info(f"Downloading historical data for {len(all_tickers)} tickers. Scanning for: **{scan_type}**...")
     
-    # Use data_period instead of hardcoding "1y"
     data = yf.download(all_tickers, period=data_period, interval=timeframe, progress=False)
-    # ---------------
     
     passed_gmma = []
     
