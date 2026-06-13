@@ -105,9 +105,16 @@ if st.sidebar.button("Run Screener"):
     sp500 = get_sp500_tickers()
     all_tickers = list(set(sp500 + custom_tickers))
     
+    # --- THE FIX ---
+    # 1 year only has 52 weeks. GMMA needs 60 periods to calculate the longest line.
+    # We dynamically request 5 years of data if 'Weekly' is selected.
+    data_period = "5y" if timeframe == "1wk" else "1y"
+    
     st.info(f"Downloading historical data for {len(all_tickers)} tickers. Scanning for: **{scan_type}**...")
     
-    data = yf.download(all_tickers, period="1y", interval=timeframe, progress=False)
+    # Use data_period instead of hardcoding "1y"
+    data = yf.download(all_tickers, period=data_period, interval=timeframe, progress=False)
+    # ---------------
     
     passed_gmma = []
     
