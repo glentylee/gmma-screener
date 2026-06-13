@@ -1,7 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-
+import requests
 # 1. Basic security: A simple password check so only you and your friend can view it.
 # To use this securely online, we will set a password in Streamlit Secrets later.
 PASSWORD = st.secrets.get("APP_PASSWORD", "secret123") 
