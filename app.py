@@ -5,7 +5,10 @@ import requests
 import io
 import plotly.graph_objects as go
 
-# 1. Password Security
+# 1. Page Configuration & Security
+# MUST be the first Streamlit command. This forces the app to full-screen width.
+st.set_page_config(page_title="GMMA Screener", layout="wide")
+
 PASSWORD = st.secrets.get("APP_PASSWORD", "secret123") 
 
 def check_password():
@@ -27,7 +30,7 @@ check_password()
 
 st.title("📈 Advanced GMMA Trend Screener")
 
-# 2. Get S&P 500 and NASDAQ 100 securely
+# 2. Market Tickers
 @st.cache_data
 def get_market_tickers():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -59,11 +62,13 @@ def get_market_tickers():
 st.sidebar.header("Screener Settings")
 
 scan_type = st.sidebar.selectbox(
-    "Select GMMA Setup",
+    "Select GMMA Trend Filter",
     [
-        "Standard Bullish (All short > All long)", 
-        "Condition 1: Compression Above (Pullback)",
-        "Condition 2: Compression Mixed (Deep Pullback)"
+        "Up Trend - Short Term GMMA", 
+        "Down Trend - Short Term GMMA",
+        "Up Trend - Long Term GMMA",
+        "Down Trend - Long Term GMMA",
+        "New Emerging GMMA Signal"
     ]
 )
 
@@ -71,10 +76,10 @@ min_market_cap = st.sidebar.number_input("Minimum Market Cap ($ Billions)", min_
 custom_input = st.sidebar.text_area("Custom Watchlist (comma-separated)", "PLTR, SOFI")
 timeframe = st.sidebar.radio("Chart Timeframe", ["1d", "1wk"], format_func=lambda x: "Daily" if x == "1d" else "Weekly")
 
-# 4. Math & Compression Counter
-def evaluate_gmma(close_prices):
+# 4. Math Engine
+def evaluate_gmma(close_prices, scan_selection):
     if len(close_prices) < 65: 
-        return "None", 0, None
+        return False, 0, None
         
     short_emas = [3, 5, 8, 10, 12, 15]
     long_emas = [30, 35, 40, 45, 50, 60]
@@ -91,39 +96,45 @@ def evaluate_gmma(close_prices):
     max_l = long_df.max(axis=1)
     min_l = long_df.min(axis=1)
     
-    is_long_uptrend = emas[30].iloc[-1] > emas[60].iloc[-1]
-    
-    if not is_long_uptrend:
-        return "None", 0, emas
-        
+    # Compression counting logic (kept intact for the data table)
     short_spread = max_s - min_s
     long_spread = max_l - min_l
     daily_compression = short_spread < (long_spread * 0.5)
     
-    # Calculate consecutive days of compression looking backward from the most recent day
     compression_count = 0
     for is_compressed in reversed(daily_compression.tolist()):
         if is_compressed:
             compression_count += 1
         else:
             break
-            
-    all_short_above_long = min_s.iloc[-1] > max_l.iloc[-1]
-    mixed_short_long = (min_s.iloc[-1] <= max_l.iloc[-1]) and (max_s.iloc[-1] >= min_l.iloc[-1])
-    
-    # Define the state purely by line position so you can see compression counts even if they are 0
-    chart_state = "None"
-    if all_short_above_long:
-        if "Above" in scan_type:
-            chart_state = "Condition 1: Compression Above (Pullback)"
-        else:
-            chart_state = "Standard Bullish (All short > All long)"
-    elif mixed_short_long and "Mixed" in scan_type:
-        chart_state = "Condition 2: Compression Mixed (Deep Pullback)"
-        
-    return chart_state, compression_count, emas
 
-# 5. The Execution Engine
+    # Determine Trend States based on the final day
+    st_uptrend = emas[3].iloc[-1] > emas[15].iloc[-1]
+    st_downtrend = emas[3].iloc[-1] < emas[15].iloc[-1]
+    lt_uptrend = emas[30].iloc[-1] > emas[60].iloc[-1]
+    lt_downtrend = emas[30].iloc[-1] < emas[60].iloc[-1]
+    
+    # Emerging Signal logic (Short term group crossed above long term group within last 5 periods)
+    current_short_above_long = min_s.iloc[-1] > max_l.iloc[-1]
+    past_short_below_long = min_s.iloc[-5] <= max_l.iloc[-5] if len(min_s) >= 5 else False
+    is_emerging = current_short_above_long and past_short_below_long
+
+    # Match the user's selected filter
+    matches_filter = False
+    if scan_selection == "Up Trend - Short Term GMMA" and st_uptrend:
+        matches_filter = True
+    elif scan_selection == "Down Trend - Short Term GMMA" and st_downtrend:
+        matches_filter = True
+    elif scan_selection == "Up Trend - Long Term GMMA" and lt_uptrend:
+        matches_filter = True
+    elif scan_selection == "Down Trend - Long Term GMMA" and lt_downtrend:
+        matches_filter = True
+    elif scan_selection == "New Emerging GMMA Signal" and is_emerging:
+        matches_filter = True
+        
+    return matches_filter, compression_count, emas
+
+# 5. Execution Engine
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = []
 if "full_data" not in st.session_state:
@@ -156,9 +167,9 @@ if st.sidebar.button("Run Screener"):
             else:
                 close_prices = data['Close'].dropna()
                 
-            chart_state, comp_days, emas = evaluate_gmma(close_prices)
+            matches, comp_days, emas = evaluate_gmma(close_prices, scan_type)
             
-            if chart_state == scan_type:
+            if matches:
                 passed_gmma.append({
                     "Ticker": ticker,
                     "Periods Compressed": comp_days
@@ -195,16 +206,14 @@ if st.sidebar.button("Run Screener"):
             
     st.session_state.scan_results = final_results
 
-# 6. Display Results and Charts
+# 6. Display Results
 if st.session_state.scan_results:
     st.success(f"Found {len(st.session_state.scan_results)} stocks matching your criteria!")
     
-    # Sort the dataframe and reset the index so Streamlit's row selection maps perfectly
     df_results = pd.DataFrame(st.session_state.scan_results).sort_values(by="Periods Compressed", ascending=False).reset_index(drop=True)
     
     st.write("👉 **Click anywhere on a row below to instantly view its chart.**")
     
-    # Renders the interactive table and captures your click
     selection_event = st.dataframe(
         df_results, 
         use_container_width=True, 
@@ -217,57 +226,10 @@ if st.session_state.scan_results:
     
     selected_ticker = None
     
-    # Check if a row was clicked
     if selection_event and "selection" in selection_event and selection_event["selection"].get("rows"):
         selected_row_index = selection_event["selection"]["rows"][0]
         selected_ticker = df_results.iloc[selected_row_index]["Ticker"]
     
     if selected_ticker and st.session_state.full_data is not None:
         try:
-            if isinstance(st.session_state.full_data.columns, pd.MultiIndex):
-                ticker_data = pd.DataFrame({
-                    'Open': st.session_state.full_data['Open'][selected_ticker],
-                    'High': st.session_state.full_data['High'][selected_ticker],
-                    'Low': st.session_state.full_data['Low'][selected_ticker],
-                    'Close': st.session_state.full_data['Close'][selected_ticker],
-                }).dropna()
-            else:
-                ticker_data = st.session_state.full_data.dropna()
-                
-            _, _, emas = evaluate_gmma(ticker_data['Close'])
-            
-            lookback = 40 # Increased slightly to give a better view of the trend
-            plot_data = ticker_data.iloc[-lookback:]
-            
-            fig = go.Figure()
-            
-            fig.add_trace(go.Candlestick(
-                x=plot_data.index,
-                open=plot_data['Open'], high=plot_data['High'],
-                low=plot_data['Low'], close=plot_data['Close'],
-                name="Price"
-            ))
-            
-            for p in [3, 5, 8, 10, 12, 15]:
-                fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='green', width=1), name=f"EMA {p}", hoverinfo='none'))
-                
-            for p in [30, 35, 40, 45, 50, 60]:
-                fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='red', width=1), name=f"EMA {p}", hoverinfo='none'))
-
-            company_name = df_results.loc[df_results['Ticker'] == selected_ticker, 'Company Name'].values[0]
-            
-            fig.update_layout(
-                title=f"{selected_ticker} - {company_name}",
-                yaxis_title="Price",
-                xaxis_rangeslider_visible=False,
-                height=600,
-                showlegend=False 
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.error("Could not generate chart for this ticker.")
-    else:
-        st.info("👆 Click a row in the table above to load its chart.")
-elif st.session_state.full_data is not None:
-    st.warning("No stocks met all the criteria right now. Try a different setup, or lower the Market Cap.")
+            if
