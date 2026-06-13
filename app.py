@@ -27,21 +27,36 @@ check_password()
 
 st.title("📈 Advanced GMMA Trend Screener")
 
-# 2. Get the Russell 1000 (Top 1000 US Stocks) instead of just S&P 500
+# 2. Get S&P 500 and NASDAQ 100 securely
 @st.cache_data
-def get_broad_market_tickers():
-    url = 'https://en.wikipedia.org/wiki/Russell_1000_Index'
+def get_market_tickers():
     headers = {'User-Agent': 'Mozilla/5.0'}
-    html_data = requests.get(url, headers=headers).text
+    tickers = []
+    
+    # Get S&P 500
     try:
-        # Wikipedia tables change format sometimes, we look for the one with 'Ticker'
-        tables = pd.read_html(io.StringIO(html_data))
-        for df in tables:
+        sp_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        sp_html = requests.get(sp_url, headers=headers).text
+        sp_df = pd.read_html(io.StringIO(sp_html))[0]
+        tickers.extend(sp_df['Symbol'].tolist())
+    except:
+        pass
+        
+    # Get NASDAQ 100
+    try:
+        ndx_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+        ndx_html = requests.get(ndx_url, headers=headers).text
+        ndx_tables = pd.read_html(io.StringIO(ndx_html))
+        for df in ndx_tables:
             if 'Ticker' in df.columns:
-                return df['Ticker'].tolist()
-    except Exception as e:
-        st.error("Could not load Russell 1000. Defaulting to a smaller list.")
-        return ["AAPL", "MSFT", "NVDA", "TSLA", "META", "AMZN"] # Fallback
+                tickers.extend(df['Ticker'].tolist())
+                break
+    except:
+        pass
+        
+    # Clean up tickers (Wikipedia uses dots, yfinance needs hyphens)
+    clean_tickers = [t.replace('.', '-') for t in set(tickers) if type(t) == str]
+    return clean_tickers if clean_tickers else ["AAPL", "MSFT", "NVDA", "SPY"]
 
 # 3. Sidebar Configuration 
 st.sidebar.header("Screener Settings")
@@ -55,9 +70,7 @@ scan_type = st.sidebar.selectbox(
     ]
 )
 
-# New dynamic Market Cap input
 min_market_cap = st.sidebar.number_input("Minimum Market Cap ($ Billions)", min_value=0.0, value=20.0, step=1.0)
-
 custom_input = st.sidebar.text_area("Custom Watchlist (comma-separated)", "PLTR, SOFI")
 timeframe = st.sidebar.radio("Chart Timeframe", ["1d", "1wk"], format_func=lambda x: "Daily" if x == "1d" else "Weekly")
 
@@ -86,24 +99,20 @@ def evaluate_gmma(close_prices):
     if not is_long_uptrend:
         return "None", 0, emas
         
-    # Calculate compression for all historical days
     short_spread = max_s - min_s
     long_spread = max_l - min_l
     daily_compression = short_spread < (long_spread * 0.5)
     
-    # Count consecutive days of compression looking backward from today
     compression_count = 0
     for is_compressed in reversed(daily_compression.tolist()):
         if is_compressed:
             compression_count += 1
         else:
-            break # Stop counting as soon as the compression breaks
+            break
             
-    # Check current state
     all_short_above_long = min_s.iloc[-1] > max_l.iloc[-1]
     mixed_short_long = (min_s.iloc[-1] <= max_l.iloc[-1]) and (max_s.iloc[-1] >= min_l.iloc[-1])
     
-    # Categorize
     chart_state = "None"
     if all_short_above_long:
         chart_state = "Standard Bullish (All short > All long)"
@@ -122,24 +131,35 @@ if "full_data" not in st.session_state:
 
 if st.sidebar.button("Run Screener"):
     custom_tickers = [x.strip().upper() for x in custom_input.split(",") if x.strip()]
-    broad_market = get_broad_market_tickers()
+    broad_market = get_market_tickers()
     all_tickers = list(set(broad_market + custom_tickers))
     
+    # Ensure at least 2 tickers to force yfinance to always return a MultiIndex DataFrame
+    if len(all_tickers) < 2:
+        all_tickers.append("SPY")
+        
     data_period = "5y" if timeframe == "1wk" else "1y"
     
     st.info(f"Downloading historical data for {len(all_tickers)} tickers. Scanning for: **{scan_type}**...")
     
     data = yf.download(all_tickers, period=data_period, interval=timeframe, progress=False)
-    st.session_state.full_data = data # Save for the charting tool later
+    st.session_state.full_data = data 
     
     passed_gmma = []
     
     for ticker in all_tickers:
         try:
-            close_prices = data['Close'][ticker].dropna()
+            # Safely extract close prices whether it is a MultiIndex or not
+            if isinstance(data.columns, pd.MultiIndex):
+                if ticker in data['Close'].columns:
+                    close_prices = data['Close'][ticker].dropna()
+                else:
+                    continue
+            else:
+                close_prices = data['Close'].dropna()
+                
             chart_state, comp_days, emas = evaluate_gmma(close_prices)
             
-            # Allow through if it matches the scan, OR if it's standard bullish we still pass it if selected
             if chart_state == scan_type or (scan_type == "Standard Bullish (All short > All long)" and "Standard" in chart_state):
                 passed_gmma.append({
                     "Ticker": ticker,
@@ -178,59 +198,57 @@ if st.sidebar.button("Run Screener"):
 if st.session_state.scan_results:
     st.success(f"Found {len(st.session_state.scan_results)} stocks matching your criteria!")
     
-    # Create a sortable dataframe
     df_results = pd.DataFrame(st.session_state.scan_results)
     st.dataframe(df_results.sort_values(by="Periods Compressed", ascending=False), use_container_width=True)
     
     st.markdown("---")
     st.subheader("📊 Visual Charting")
     
-    # Dropdown to select a stock from the successful results
     passed_tickers = df_results["Ticker"].tolist()
     selected_ticker = st.selectbox("Select a stock to view its GMMA chart:", passed_tickers)
     
     if selected_ticker and st.session_state.full_data is not None:
-        # Extract data for just this ticker
-        ticker_data = pd.DataFrame({
-            'Open': st.session_state.full_data['Open'][selected_ticker],
-            'High': st.session_state.full_data['High'][selected_ticker],
-            'Low': st.session_state.full_data['Low'][selected_ticker],
-            'Close': st.session_state.full_data['Close'][selected_ticker],
-        }).dropna()
-        
-        # Recalculate EMAs for plotting
-        _, _, emas = evaluate_gmma(ticker_data['Close'])
-        
-        # Isolate the last 20 candles (10 is often too tight to see the GMMA trend direction)
-        lookback = 20 
-        plot_data = ticker_data.iloc[-lookback:]
-        
-        fig = go.Figure()
-        
-        # Add Candlesticks
-        fig.add_trace(go.Candlestick(
-            x=plot_data.index,
-            open=plot_data['Open'], high=plot_data['High'],
-            low=plot_data['Low'], close=plot_data['Close'],
-            name="Price"
-        ))
-        
-        # Add Short EMAs (Green)
-        for p in [3, 5, 8, 10, 12, 15]:
-            fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='green', width=1), name=f"EMA {p}", hoverinfo='none'))
+        try:
+            if isinstance(st.session_state.full_data.columns, pd.MultiIndex):
+                ticker_data = pd.DataFrame({
+                    'Open': st.session_state.full_data['Open'][selected_ticker],
+                    'High': st.session_state.full_data['High'][selected_ticker],
+                    'Low': st.session_state.full_data['Low'][selected_ticker],
+                    'Close': st.session_state.full_data['Close'][selected_ticker],
+                }).dropna()
+            else:
+                ticker_data = st.session_state.full_data.dropna()
+                
+            _, _, emas = evaluate_gmma(ticker_data['Close'])
             
-        # Add Long EMAs (Red)
-        for p in [30, 35, 40, 45, 50, 60]:
-            fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='red', width=1), name=f"EMA {p}", hoverinfo='none'))
+            lookback = 30 
+            plot_data = ticker_data.iloc[-lookback:]
+            
+            fig = go.Figure()
+            
+            fig.add_trace(go.Candlestick(
+                x=plot_data.index,
+                open=plot_data['Open'], high=plot_data['High'],
+                low=plot_data['Low'], close=plot_data['Close'],
+                name="Price"
+            ))
+            
+            for p in [3, 5, 8, 10, 12, 15]:
+                fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='green', width=1), name=f"EMA {p}", hoverinfo='none'))
+                
+            for p in [30, 35, 40, 45, 50, 60]:
+                fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='red', width=1), name=f"EMA {p}", hoverinfo='none'))
 
-        fig.update_layout(
-            title=f"{selected_ticker} - Last {lookback} Periods GMMA",
-            yaxis_title="Price",
-            xaxis_rangeslider_visible=False,
-            height=600,
-            showlegend=False # Hiding legend because 12 lines makes it too cluttered
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+            fig.update_layout(
+                title=f"{selected_ticker} - Last {lookback} Periods GMMA",
+                yaxis_title="Price",
+                xaxis_rangeslider_visible=False,
+                height=600,
+                showlegend=False 
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            st.error("Could not generate chart for this ticker.")
 elif st.session_state.full_data is not None:
     st.warning("No stocks met all the criteria right now. Try a different setup, or lower the Market Cap.")
