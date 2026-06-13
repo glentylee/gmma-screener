@@ -28,10 +28,17 @@ st.title("📈 GMMA Trend Screener")
 st.write("Screening the S&P 500 and your custom watchlist using Daryl Guppy's GMMA.")
 
 # 2. Get S&P 500 tickers directly from Wikipedia
+# 2. Get S&P 500 tickers directly from Wikipedia securely
 @st.cache_data
 def get_sp500_tickers():
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    df = pd.read_html(url)[0]
+    # Disguise our script as a normal web browser
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    
+    # Fetch the page HTML first, then pass it to pandas
+    html_data = requests.get(url, headers=headers).text
+    df = pd.read_html(html_data)[0]
+    
     return df['Symbol'].tolist()
 
 # 3. Sidebar Configuration for your Custom Watchlist and Timeframes
