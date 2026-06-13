@@ -232,4 +232,50 @@ if st.session_state.scan_results:
     
     if selected_ticker and st.session_state.full_data is not None:
         try:
-            if
+            if isinstance(st.session_state.full_data.columns, pd.MultiIndex):
+                ticker_data = pd.DataFrame({
+                    'Open': st.session_state.full_data['Open'][selected_ticker],
+                    'High': st.session_state.full_data['High'][selected_ticker],
+                    'Low': st.session_state.full_data['Low'][selected_ticker],
+                    'Close': st.session_state.full_data['Close'][selected_ticker],
+                }).dropna()
+            else:
+                ticker_data = st.session_state.full_data.dropna()
+                
+            _, _, emas = evaluate_gmma(ticker_data['Close'], scan_type)
+            
+            lookback = 40 
+            plot_data = ticker_data.iloc[-lookback:]
+            
+            fig = go.Figure()
+            
+            fig.add_trace(go.Candlestick(
+                x=plot_data.index,
+                open=plot_data['Open'], high=plot_data['High'],
+                low=plot_data['Low'], close=plot_data['Close'],
+                name="Price"
+            ))
+            
+            for p in [3, 5, 8, 10, 12, 15]:
+                fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='green', width=1), name=f"EMA {p}", hoverinfo='none'))
+                
+            for p in [30, 35, 40, 45, 50, 60]:
+                fig.add_trace(go.Scatter(x=plot_data.index, y=emas[p].iloc[-lookback:], line=dict(color='red', width=1), name=f"EMA {p}", hoverinfo='none'))
+
+            company_name = df_results.loc[df_results['Ticker'] == selected_ticker, 'Company Name'].values[0]
+            
+            fig.update_layout(
+                title=f"{selected_ticker} - {company_name}",
+                yaxis_title="Price",
+                xaxis_rangeslider_visible=False,
+                height=600,
+                showlegend=False 
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error("Could not generate chart for this ticker.")
+    else:
+        st.info("👆 Click a row in the table above to load its chart.")
+elif st.session_state.full_data is not None:
+    st.warning("No stocks met all the criteria right now. Try a different setup, or lower the Market Cap.")
